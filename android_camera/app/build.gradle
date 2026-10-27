@@ -1,10 +1,26 @@
+
 plugins {
     id 'com.android.application'
 }
 
+def localProperties = new Properties()
+def localPropertiesFile = rootProject.file("local.properties")
+
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.withInputStream {
+        localProperties.load(it)
+    }
+}
+
+def remoteCameraToken = localProperties.getProperty("REMOTE_CAMERA_TOKEN", "")
+
 android {
     namespace 'com.remotecamera.app'
     compileSdk 35
+
+    buildFeatures {
+        buildConfig true
+    }
 
     defaultConfig {
         applicationId 'com.remotecamera.app'
@@ -12,12 +28,15 @@ android {
         targetSdk 35
         versionCode 1
         versionName '1.0'
+
+        buildConfigField "String", "REMOTE_CAMERA_TOKEN", "\"${remoteCameraToken}\""
     }
 }
 
 dependencies {
     def camerax_version = "1.4.2"
 
+    implementation "androidx.work:work-runtime:2.10.0"
     implementation "androidx.camera:camera-core:$camerax_version"
     implementation "androidx.camera:camera-camera2:$camerax_version"
     implementation "androidx.camera:camera-lifecycle:$camerax_version"

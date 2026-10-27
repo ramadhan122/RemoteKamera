@@ -1,4 +1,4 @@
-
+import sqlite3
 from pathlib import Path
 from uuid import uuid4
 import os
@@ -10,6 +10,23 @@ from fastapi.staticfiles import StaticFiles
 BASE_DIR = Path(__file__).resolve().parent.parent
 UPLOAD_DIR = BASE_DIR / "received_files"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+DB_PATH = UPLOAD_DIR / "transfer_receipts.sqlite3"
+
+
+def init_transfer_db():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS transfer_receipts (
+                transfer_id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                stored_as TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL
+            )
+        """)
+
+
+init_transfer_db()
 
 # Atur token melalui environment variable sebelum menjalankan server.
 API_TOKEN = os.environ.get("REMOTE_CAMERA_TOKEN")
@@ -71,6 +88,7 @@ async def health():
 async def upload_file(
     file: UploadFile = File(...),
     authorization: str | None = Header(default=None),
+    transfer_id: str | None = Header(default=None, alias="X-File-ID"),
 ):
     if not API_TOKEN:
         raise HTTPException(
@@ -90,39 +108,67 @@ async def upload_file(
             detail="Format file tidak didukung.",
         )
 
-    # Nama internal dibuat acak agar tidak menimpa file yang sudah ada.
-    safe_name = f"{uuid4().hex}{extension}"
-    destination = UPLOAD_DIR / safe_name
-    size = 0
-
     try:
-        with destination.open("xb") as output:
-            while chunk := await file.read(1024 * 1024):
-                size += len(chunk)
+        # Jika transfer ini sudah selesai, kembalikan hasil sebelumnya.
+        if transfer_id:
+            with sqlite3.connect(DB_PATH) as conn:
+                row = conn.execute(
+                    """
+                    SELECT filename, stored_as, size_bytes
+                    FROM transfer_receipts
+                    WHERE transfer_id = ?
+                    """,
+                    (transfer_id,),
+                ).fetchone()
 
-                if size > MAX_FILE_SIZE:
-                    raise HTTPException(
-                        status_code=413,
-                        detail="Ukuran file melebihi batas 2 GB.",
+            if row:
+                return {
+                    "status": "success",
+                    "filename": row[0],
+                    "stored_as": row[1],
+                    "size_bytes": row[2],
+                    "duplicate": True,
+                }
+
+        safe_name = f"{uuid4().hex}{extension}"
+        destination = UPLOAD_DIR / safe_name
+        size = 0
+
+        try:
+            with destination.open("xb") as output:
+                while chunk := await file.read(1024 * 1024):
+                    size += len(chunk)
+
+                    if size > MAX_FILE_SIZE:
+                        raise HTTPException(
+                            status_code=413,
+                            detail="Ukuran file melebihi batas 2 GB.",
+                        )
+
+                    output.write(chunk)
+
+            if transfer_id:
+                with sqlite3.connect(DB_PATH) as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO transfer_receipts
+                        (transfer_id, filename, stored_as, size_bytes)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (transfer_id, original_name, safe_name, size),
                     )
 
-                output.write(chunk)
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
 
-    except HTTPException:
-        destination.unlink(missing_ok=True)
-        raise
-    except Exception:
-        destination.unlink(missing_ok=True)
-        raise HTTPException(
-            status_code=500,
-            detail="Gagal menyimpan file.",
-        )
+        return {
+            "status": "success",
+            "filename": original_name,
+            "stored_as": safe_name,
+            "size_bytes": size,
+            "duplicate": False,
+        }
+
     finally:
         await file.close()
-
-    return {
-        "status": "success",
-        "filename": original_name,
-        "stored_as": safe_name,
-        "size_bytes": size,
-    }
